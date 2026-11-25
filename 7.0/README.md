@@ -22,19 +22,15 @@ Agentless monitoring of **Ansible Semaphore UI** via its REST API for **Zabbix 7
 
 ## Import & Host Setup
 
-1. **Validate Locally**:
-   ```bash
-   ./scripts/validate-templates.py
-   ```
-2. **Import into Zabbix**:
+1. **Import into Zabbix**:
    - Navigate to **Data collection → Templates → Import** and select `7.0/zbx_template_ansible_semaphore.yaml`.
-3. **Create or Link a Host**:
+2. **Create or Link a Host**:
    - Navigate to **Data collection → Hosts → Create host**:
      - **Host name:** e.g. `semaphore` (or `semaphore-project-1` when monitoring multiple projects)
      - **Host groups:** e.g. `Applications`
      - **Templates:** Link **Semaphore UI by HTTP**
      - **Interfaces:** None required (HTTP Agent items run agentlessly)
-4. **Configure Host Macros**:
+3. **Configure Host Macros**:
    - Set `{$SEMAPHORE.URL}`, `{$SEMAPHORE.API.TOKEN}` (`Secret text`), and `{$SEMAPHORE.PROJECT.ID}` on the host.
 
 ---
