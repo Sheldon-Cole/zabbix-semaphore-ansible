@@ -1,7 +1,7 @@
 zabbix_export:
   version: '7.0'
   template_groups:
-    - uuid: 7df96b18c230490a9a0a9e2307226338
+    - uuid: a571c0d144b14fd4a87a9d9b2aa9fcd6
       name: Templates/Applications
   templates:
     - uuid: ef81c29813294464bb79177c5eced4cf
@@ -204,10 +204,6 @@ zabbix_export:
                   parameters:
                     - '$[?(@.id=={#ID})].app.first()'
                   error_handler: DISCARD_VALUE
-                - type: NOT_MATCHES_REGEX
-                  parameters:
-                    - '^(null|)$'
-                  error_handler: DISCARD_VALUE
                 - type: DISCARD_UNCHANGED_HEARTBEAT
                   parameters:
                     - 1d
@@ -230,9 +226,10 @@ zabbix_export:
                   parameters:
                     - '$[?(@.id=={#ID})].last_task.end.first()'
                   error_handler: DISCARD_VALUE
-                - type: NOT_MATCHES_REGEX
+                - type: REGEX
                   parameters:
-                    - '^(null|0001-.*|)$'
+                    - '^([1-9][0-9]{3}-[0-9]{2}-[0-9]{2}T.+)$'
+                    - '\1'
                   error_handler: DISCARD_VALUE
                 - type: JAVASCRIPT
                   parameters:
@@ -241,11 +238,7 @@ zabbix_export:
                         /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})\d*Z$/,
                         '$1Z'
                       );
-                      var ts = Date.parse(s);
-                      if (isNaN(ts) || ts <= 0) {
-                        throw 'Invalid timestamp: ' + value;
-                      }
-                      return Math.floor(ts / 1000);
+                      return Math.floor(Date.parse(s) / 1000);
                 - type: DISCARD_UNCHANGED_HEARTBEAT
                   parameters:
                     - 1d
@@ -267,9 +260,10 @@ zabbix_export:
                   parameters:
                     - '$[?(@.id=={#ID})].last_task.id.first()'
                   error_handler: DISCARD_VALUE
-                - type: NOT_MATCHES_REGEX
+                - type: REGEX
                   parameters:
-                    - '^(null|)$'
+                    - '^([0-9]+)$'
+                    - '\1'
                   error_handler: DISCARD_VALUE
                 - type: DISCARD_UNCHANGED_HEARTBEAT
                   parameters:
@@ -293,10 +287,6 @@ zabbix_export:
                   parameters:
                     - '$[?(@.id=={#ID})].last_task.tpl_playbook.first()'
                   error_handler: DISCARD_VALUE
-                - type: NOT_MATCHES_REGEX
-                  parameters:
-                    - '^(null|)$'
-                  error_handler: DISCARD_VALUE
                 - type: DISCARD_UNCHANGED_HEARTBEAT
                   parameters:
                     - 1d
@@ -319,9 +309,10 @@ zabbix_export:
                   parameters:
                     - '$[?(@.id=={#ID})].last_task.start.first()'
                   error_handler: DISCARD_VALUE
-                - type: NOT_MATCHES_REGEX
+                - type: REGEX
                   parameters:
-                    - '^(null|0001-.*|)$'
+                    - '^([1-9][0-9]{3}-[0-9]{2}-[0-9]{2}T.+)$'
+                    - '\1'
                   error_handler: DISCARD_VALUE
                 - type: JAVASCRIPT
                   parameters:
@@ -330,11 +321,7 @@ zabbix_export:
                         /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})\d*Z$/,
                         '$1Z'
                       );
-                      var ts = Date.parse(s);
-                      if (isNaN(ts) || ts <= 0) {
-                        throw 'Invalid timestamp: ' + value;
-                      }
-                      return Math.floor(ts / 1000);
+                      return Math.floor(Date.parse(s) / 1000);
                 - type: DISCARD_UNCHANGED_HEARTBEAT
                   parameters:
                     - 1d
@@ -358,9 +345,10 @@ zabbix_export:
                   parameters:
                     - '$[?(@.id=={#ID})].last_task.status.first()'
                   error_handler: DISCARD_VALUE
-                - type: NOT_MATCHES_REGEX
+                - type: REGEX
                   parameters:
-                    - '^(null|)$'
+                    - '^(stopped|success|error|running|starting|stopping|waiting|confirmed)$'
+                    - '\1'
                   error_handler: DISCARD_VALUE
                 - type: JAVASCRIPT
                   parameters:
