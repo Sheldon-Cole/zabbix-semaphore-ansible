@@ -2,343 +2,491 @@ zabbix_export:
   version: '7.0'
   template_groups:
     - uuid: 7df96b18c230490a9a0a9e2307226338
-      name: Templates
+      name: Templates/Applications
   templates:
     - uuid: ef81c29813294464bb79177c5eced4cf
-      template: 'Zabbix template semaphore task monitoring'
-      name: 'Zabbix template semaphore task monitoring'
+      template: 'Semaphore UI by HTTP'
+      name: 'Semaphore UI by HTTP'
       description: |
-        Author: Thomas Rzen
-        Source: https://github.com/Garfieldttt/zabbix-semaphore-ansible/tree/zabbix
-        
-        This template enables agentless monitoring of Ansible Semaphore via its REST API.
-        
+        Agentless monitoring of Ansible Semaphore UI via its REST API.
+
         Features:
-        - API health check via /api/ping
-        - Semaphore and Ansible version tracking via /api/info
-        - Fetches templates from a specified Semaphore project (via macro {$PROJECT_NUMBER})
-        - Uses Low-Level Discovery (LLD) to detect templates dynamically
-        - Extracts and monitors last task status, start/end time and playbook per template
-        - Automatically maps statuses (success, error, running, stopped, waiting) to numeric values
-        - Triggers alerts when tasks fail (configurable per template via context macro {$ENABLE_TRIGGER:"{#ID}"})
-        - Triggers alerts when tasks remain in running state longer than {$JOB_RUNNING_TIME}
-        
+        - API availability check via `/api/ping` with hysteresis and nodata detection
+        - Semaphore and Ansible version tracking via `/api/info` with change detection
+        - Low-Level Discovery (LLD) of project templates via `/api/project/{$SEMAPHORE.PROJECT.ID}/templates`
+        - Per-template dependent items for last task status, task ID, start/end timestamps, playbook, and app type
+        - Context-aware trigger thresholds (`{$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}` and `{$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"}`)
+
         Requirements:
-        - Semaphore instance with API access
-        - Valid API token set in macro {$API_TOKEN}
-        - Accessible Semaphore API URL in macro {$SEMAPHORE_URL} (no trailing slash)
-        - Project ID set in macro {$PROJECT_NUMBER}
+        - Configure `{$SEMAPHORE.URL}`, `{$SEMAPHORE.API.TOKEN}` (Secret text), and `{$SEMAPHORE.PROJECT.ID}` on the target host.
+
+        Original author: Thomas Rzen (https://github.com/Garfieldttt/zabbix-semaphore-ansible)
       groups:
-        - name: Templates
+        - name: Templates/Applications
       items:
         - uuid: 19cb0cad83c44f95bcde051b625187ad
-          name: 'Ansible version'
+          name: 'Semaphore: Ansible version'
           type: DEPENDENT
           key: semaphore.ansible.version
-          delay: '0'
           history: 90d
           value_type: CHAR
-          trends: '0'
-          description: 'Ansible version installed on the Semaphore host. From /api/info, field "ansible".'
+          description: 'Ansible version installed on the Semaphore host (from `/api/info`, field `$.ansible`).'
           preprocessing:
             - type: JSONPATH
               parameters:
                 - $.ansible
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
           master_item:
             key: semaphore.info.raw
           tags:
-            - tag: Semaphore
+            - tag: component
+              value: application
+            - tag: component
               value: version
         - uuid: 3fb9b109163d4ce38a0b604398a5134b
-          name: 'Semaphore info raw'
+          name: 'Semaphore: Get info'
           type: HTTP_AGENT
           key: semaphore.info.raw
-          delay: '3600'
-          history: 1d
+          delay: 1h
+          history: '0'
           value_type: TEXT
-          trends: '0'
-          description: 'Raw data of Semaphore instance information. Source for version items. Endpoint: /api/info'
-          url: '{$SEMAPHORE_URL}/api/info'
+          description: 'Raw JSON payload of Semaphore instance metadata from `/api/info`. Master item for version dependent items.'
+          timeout: '{$SEMAPHORE.HTTP.TIMEOUT}'
+          url: '{$SEMAPHORE.URL}/api/info'
+          status_codes: '200'
           headers:
             - name: Authorization
-              value: 'Bearer {$API_TOKEN}'
+              value: 'Bearer {$SEMAPHORE.API.TOKEN}'
             - name: Accept
               value: application/json
           tags:
-            - tag: Semaphore
+            - tag: component
               value: raw
         - uuid: 09da8ae391c24fe08117888cb5f23265
-          name: 'Semaphore API ping'
+          name: 'Semaphore: API ping'
           type: HTTP_AGENT
           key: semaphore.ping
-          delay: '60'
+          delay: 1m
           history: 7d
-          value_type: CHAR
-          trends: '0'
-          description: 'Health check of the Semaphore API. Expects the response "pong". No auth header required. Endpoint: /api/ping'
-          url: '{$SEMAPHORE_URL}/api/ping'
+          description: 'Health check of the Semaphore UI API (`/api/ping`). Maps `"pong"` response to `1` (Up) and any other response to `0` (Down).'
+          valuemap:
+            name: 'Service state'
+          timeout: '{$SEMAPHORE.HTTP.TIMEOUT}'
+          url: '{$SEMAPHORE.URL}/api/ping'
+          status_codes: '200'
+          preprocessing:
+            - type: REGEX
+              parameters:
+                - '^\s*pong\s*$'
+                - '1'
+              error_handler: CUSTOM_VALUE
+              error_handler_params: '0'
           tags:
-            - tag: Semaphore
+            - tag: component
               value: health
           triggers:
             - uuid: 7ac50a861eed4fcc83dab29cd4412b54
-              expression: 'last(/Zabbix template semaphore task monitoring/semaphore.ping)<>"pong"'
-              name: 'Semaphore API unreachable'
-              opdata: 'Response: {ITEM.LASTVALUE}'
+              expression: 'max(/Semaphore UI by HTTP/semaphore.ping,#3)=0 or nodata(/Semaphore UI by HTTP/semaphore.ping,3m)=1'
+              recovery_mode: RECOVERY_EXPRESSION
+              recovery_expression: 'min(/Semaphore UI by HTTP/semaphore.ping,#2)=1'
+              name: 'Semaphore: API is unreachable on {HOST.NAME}'
+              opdata: 'State: {ITEM.LASTVALUE1}'
               priority: AVERAGE
-              description: 'The Semaphore API is not responding with "pong". Semaphore may be unreachable or the service is stopped.'
-              manual_close: 'YES'
+              description: |
+                The Semaphore UI `/api/ping` endpoint on {HOST.NAME} failed 3 consecutive checks or has not responded for 3 minutes.
+
+                Troubleshooting:
+                1. Verify that the Semaphore UI service or container is running.
+                2. Confirm that `{$SEMAPHORE.URL}` is reachable from the Zabbix server or proxy.
+                3. Inspect reverse proxy or firewall logs for connection errors.
+              tags:
+                - tag: scope
+                  value: availability
         - uuid: 59ceff5c10084e4ba92f8e83c03527e2
-          name: 'Semaphore raw'
+          name: 'Semaphore: Get project templates'
           type: HTTP_AGENT
           key: semaphore.raw
-          delay: '300'
-          history: 1d
+          delay: 5m
+          history: '0'
           value_type: TEXT
-          trends: '0'
-          description: 'Raw data of all templates in the configured project ({$PROJECT_NUMBER}). Source for all dependent items and the LLD discovery rule. Endpoint: /api/project/{$PROJECT_NUMBER}/templates'
-          timeout: 60s
-          url: '{$SEMAPHORE_URL}/api/project/{$PROJECT_NUMBER}/templates'
+          description: 'Raw JSON array of all templates in Semaphore project `{$SEMAPHORE.PROJECT.ID}` (`/api/project/{$SEMAPHORE.PROJECT.ID}/templates`). Master item for template LLD and task prototypes.'
+          timeout: '{$SEMAPHORE.HTTP.TIMEOUT}'
+          url: '{$SEMAPHORE.URL}/api/project/{$SEMAPHORE.PROJECT.ID}/templates'
+          status_codes: '200'
           headers:
             - name: Authorization
-              value: 'Bearer {$API_TOKEN}'
+              value: 'Bearer {$SEMAPHORE.API.TOKEN}'
             - name: Accept
               value: application/json
           tags:
-            - tag: Semaphore
+            - tag: component
               value: raw
+          triggers:
+            - uuid: a8f2d1c47e634b9182d5c0e93a4b7612
+              expression: 'nodata(/Semaphore UI by HTTP/semaphore.raw,15m)=1'
+              name: 'Semaphore: Failed to fetch project templates on {HOST.NAME}'
+              priority: WARNING
+              description: |
+                Zabbix has not received project template data from `/api/project/{$SEMAPHORE.PROJECT.ID}/templates` for 15 minutes while the `/api/ping` health check is reachable.
+
+                Troubleshooting:
+                1. Verify that `{$SEMAPHORE.API.TOKEN}` is valid and has not expired.
+                2. Confirm that project ID `{$SEMAPHORE.PROJECT.ID}` exists and the token user has permission to view it.
+              dependencies:
+                - name: 'Semaphore: API is unreachable on {HOST.NAME}'
+                  expression: 'max(/Semaphore UI by HTTP/semaphore.ping,#3)=0 or nodata(/Semaphore UI by HTTP/semaphore.ping,3m)=1'
+                  recovery_expression: 'min(/Semaphore UI by HTTP/semaphore.ping,#2)=1'
+              tags:
+                - tag: scope
+                  value: availability
         - uuid: 4e714879e1414173b6af7e86ed0a88a8
-          name: 'Semaphore version'
+          name: 'Semaphore: Version'
           type: DEPENDENT
           key: semaphore.version
-          delay: '0'
           history: 90d
           value_type: CHAR
-          trends: '0'
-          description: 'Software version of the Semaphore instance. From /api/info, field "version".'
+          description: 'Software version of the Semaphore UI instance (from `/api/info`, field `$.version`).'
           preprocessing:
             - type: JSONPATH
               parameters:
                 - $.version
+              error_handler: DISCARD_VALUE
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1d
           master_item:
             key: semaphore.info.raw
           tags:
-            - tag: Semaphore
+            - tag: component
+              value: application
+            - tag: component
               value: version
+          triggers:
+            - uuid: c3e1f4a28b794d0695a2e8b14c7d9301
+              expression: 'last(/Semaphore UI by HTTP/semaphore.version,#1)<>last(/Semaphore UI by HTTP/semaphore.version,#2) and length(last(/Semaphore UI by HTTP/semaphore.version))>0'
+              name: 'Semaphore: Version has changed on {HOST.NAME} (new version: {ITEM.VALUE})'
+              priority: INFO
+              description: 'The Semaphore UI software version has changed on {HOST.NAME}.'
+              manual_close: 'YES'
+              tags:
+                - tag: scope
+                  value: notice
       discovery_rules:
         - uuid: b316cbc7553545a9a0f277d30b82f4a0
-          name: semaphor-discover
+          name: 'Semaphore template discovery'
           type: DEPENDENT
-          key: semaphor.discover
-          delay: '0'
-          description: 'Discovers all templates in the configured Semaphore project. LLD macros: {#ID} (template ID), {#NAME} (name), {#LAST_TASK_ID} (last task ID), {#STATUS} (template status).'
+          key: semaphore.template.discovery
+          lifetime: 7d
+          description: 'Discovers templates in Semaphore project `{$SEMAPHORE.PROJECT.ID}`. Volatile `last_task` fields are stripped before `DISCARD_UNCHANGED_HEARTBEAT` to avoid unnecessary LLD churn.'
+          filter:
+            evaltype: AND
+            conditions:
+              - macro: '{#NAME}'
+                value: '{$SEMAPHORE.LLD.FILTER.NAME.MATCHES}'
+                formulaid: A
+              - macro: '{#NAME}'
+                value: '{$SEMAPHORE.LLD.FILTER.NAME.NOT_MATCHES}'
+                operator: NOT_MATCHES_REGEX
+                formulaid: B
           item_prototypes:
             - uuid: 75fda2730e3049168b0e0a3d43eddea7
-              name: 'Task {#NAME} app type'
+              name: 'Task {#NAME}: App type'
               type: DEPENDENT
-              key: 'task.app[{#ID}]'
-              delay: '0'
+              key: 'semaphore.task.app[{#ID}]'
+              history: 90d
               value_type: CHAR
-              trends: '0'
-              description: 'App type of Semaphore template {#NAME} (e.g. ansible, terraform). From template field "app".'
+              description: 'Application/runner type of Semaphore template "{#NAME}" (e.g., `ansible`, `terraform`, `bash`).'
               preprocessing:
                 - type: JSONPATH
                   parameters:
-                    - '$[?(@.id=={#ID})].app'
+                    - '$[?(@.id=={#ID})].app.first()'
                   error_handler: DISCARD_VALUE
-                - type: LTRIM
+                - type: NOT_MATCHES_REGEX
                   parameters:
-                    - '["'
-                - type: RTRIM
+                    - '^(null|)$'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
                   parameters:
-                    - '"]'
+                    - 1d
               master_item:
                 key: semaphore.raw
               tags:
-                - tag: Semaphore
+                - tag: component
                   value: task
+                - tag: template
+                  value: '{#NAME}'
             - uuid: 8bdc90ecedd44183aa624d5a7747f9fa
-              name: 'Task {#NAME} end time'
+              name: 'Task {#NAME}: Last end time'
               type: DEPENDENT
-              key: 'task.endtime[{#ID}]'
-              delay: '0'
+              key: 'semaphore.task.end_time[{#ID}]'
+              history: 90d
               units: unixtime
-              description: 'Unix timestamp of the end of the last task run for template {#NAME}. Discarded while the task is still running (no end timestamp available).'
+              description: 'Unix timestamp of when the last task run for template "{#NAME}" finished. Discarded while a task is actively running or if the template has never run.'
               preprocessing:
                 - type: JSONPATH
                   parameters:
-                    - '$[?(@.id=={#ID})].last_task.end'
+                    - '$[?(@.id=={#ID})].last_task.end.first()'
                   error_handler: DISCARD_VALUE
-                - type: LTRIM
+                - type: NOT_MATCHES_REGEX
                   parameters:
-                    - '["'
-                - type: RTRIM
-                  parameters:
-                    - '"]'
+                    - '^(null|0001-.*|)$'
+                  error_handler: DISCARD_VALUE
                 - type: JAVASCRIPT
                   parameters:
                     - |
-                      var s = value;
-                      s = s.replace(
+                      var s = value.replace(
                         /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})\d*Z$/,
                         '$1Z'
                       );
-                      return Math.floor(Date.parse(s) / 1000);
+                      var ts = Date.parse(s);
+                      if (isNaN(ts) || ts <= 0) {
+                        throw 'Invalid timestamp: ' + value;
+                      }
+                      return Math.floor(ts / 1000);
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
               master_item:
                 key: semaphore.raw
               tags:
-                - tag: Semaphore
+                - tag: component
                   value: task
+                - tag: template
+                  value: '{#NAME}'
+            - uuid: 6d4c8b1a92e74f3081c5a4b3e2d1f098
+              name: 'Task {#NAME}: Last task ID'
+              type: DEPENDENT
+              key: 'semaphore.task.id[{#ID}]'
+              history: 90d
+              description: 'ID of the most recent task execution for template "{#NAME}". Discarded if the template has never been executed.'
+              preprocessing:
+                - type: JSONPATH
+                  parameters:
+                    - '$[?(@.id=={#ID})].last_task.id.first()'
+                  error_handler: DISCARD_VALUE
+                - type: NOT_MATCHES_REGEX
+                  parameters:
+                    - '^(null|)$'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
+              master_item:
+                key: semaphore.raw
+              tags:
+                - tag: component
+                  value: task
+                - tag: template
+                  value: '{#NAME}'
             - uuid: 74f705372d954a6180fa15e3e7d0b9ef
-              name: 'Task {#NAME} playbook'
+              name: 'Task {#NAME}: Playbook'
               type: DEPENDENT
-              key: 'task.playbook[{#ID}]'
-              delay: '0'
+              key: 'semaphore.task.playbook[{#ID}]'
+              history: 90d
               value_type: CHAR
-              trends: '0'
-              description: 'Name of the playbook executed in the last run of template {#NAME}. From last_task.tpl_playbook.'
+              description: 'Playbook filename executed in the last run of template "{#NAME}" (`last_task.tpl_playbook`).'
               preprocessing:
                 - type: JSONPATH
                   parameters:
-                    - '$[?(@.id=={#ID})].last_task.tpl_playbook'
+                    - '$[?(@.id=={#ID})].last_task.tpl_playbook.first()'
                   error_handler: DISCARD_VALUE
-                - type: LTRIM
+                - type: NOT_MATCHES_REGEX
                   parameters:
-                    - '["'
-                - type: RTRIM
+                    - '^(null|)$'
+                  error_handler: DISCARD_VALUE
+                - type: DISCARD_UNCHANGED_HEARTBEAT
                   parameters:
-                    - '"]'
+                    - 1d
               master_item:
                 key: semaphore.raw
               tags:
-                - tag: Semaphore
+                - tag: component
                   value: task
+                - tag: template
+                  value: '{#NAME}'
             - uuid: 3892ddc4103444ce99331edda3bda5af
-              name: 'Task {#NAME} start time'
+              name: 'Task {#NAME}: Last start time'
               type: DEPENDENT
-              key: 'task.starttime[{#ID}]'
-              delay: '0'
+              key: 'semaphore.task.start_time[{#ID}]'
+              history: 90d
               units: unixtime
-              description: 'Unix timestamp of the start of the last task run for template {#NAME}. ISO-8601 timestamp from last_task.start is converted to seconds since epoch via JavaScript.'
+              description: 'Unix timestamp of when the last task run for template "{#NAME}" started.'
               preprocessing:
                 - type: JSONPATH
                   parameters:
-                    - '$[?(@.id=={#ID})].last_task.start'
+                    - '$[?(@.id=={#ID})].last_task.start.first()'
                   error_handler: DISCARD_VALUE
-                - type: LTRIM
+                - type: NOT_MATCHES_REGEX
                   parameters:
-                    - '["'
-                - type: RTRIM
-                  parameters:
-                    - '"]'
+                    - '^(null|0001-.*|)$'
+                  error_handler: DISCARD_VALUE
                 - type: JAVASCRIPT
                   parameters:
                     - |
-                      var s = value;
-                      s = s.replace(
+                      var s = value.replace(
                         /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})\d*Z$/,
                         '$1Z'
                       );
-                      return Math.floor(Date.parse(s) / 1000);
+                      var ts = Date.parse(s);
+                      if (isNaN(ts) || ts <= 0) {
+                        throw 'Invalid timestamp: ' + value;
+                      }
+                      return Math.floor(ts / 1000);
+                - type: DISCARD_UNCHANGED_HEARTBEAT
+                  parameters:
+                    - 1d
               master_item:
                 key: semaphore.raw
               tags:
-                - tag: Semaphore
+                - tag: component
                   value: task
+                - tag: template
+                  value: '{#NAME}'
             - uuid: 3fc4c552ab534252ab22230b935a4082
-              name: 'Task {#NAME}'
+              name: 'Task {#NAME}: Last task status'
               type: DEPENDENT
-              key: 'task.status[{#ID}]'
-              delay: '0'
-              description: 'Numeric status of the last task run for template {#NAME} (ID: {#ID}). Mapping: 0=stopped, 1=success, 2=error, 3=running, 4=waiting.'
+              key: 'semaphore.task.status[{#ID}]'
+              history: 90d
+              description: 'Numeric status of the last task run for template "{#NAME}" (ID: {#ID}). Mapping: 0=Stopped, 1=Success, 2=Error, 3=Running, 4=Waiting, 5=Unknown.'
               valuemap:
-                name: Task-status
+                name: 'Semaphore task status'
               preprocessing:
                 - type: JSONPATH
                   parameters:
-                    - '$[?(@.id=={#ID})].last_task.status'
-                - type: LTRIM
+                    - '$[?(@.id=={#ID})].last_task.status.first()'
+                  error_handler: DISCARD_VALUE
+                - type: NOT_MATCHES_REGEX
                   parameters:
-                    - '["'
-                - type: RTRIM
+                    - '^(null|)$'
+                  error_handler: DISCARD_VALUE
+                - type: JAVASCRIPT
                   parameters:
-                    - '"]'
-                - type: STR_REPLACE
-                  parameters:
-                    - stopped
-                    - '0'
-                - type: STR_REPLACE
-                  parameters:
-                    - success
-                    - '1'
-                - type: STR_REPLACE
-                  parameters:
-                    - error
-                    - '2'
-                - type: STR_REPLACE
-                  parameters:
-                    - running
-                    - '3'
-                - type: STR_REPLACE
-                  parameters:
-                    - waiting
-                    - '4'
+                    - |
+                      var map = {
+                        stopped: 0,
+                        success: 1,
+                        error: 2,
+                        running: 3,
+                        starting: 3,
+                        stopping: 3,
+                        waiting: 4,
+                        confirmed: 4
+                      };
+                      var key = value.trim().toLowerCase();
+                      return (key in map) ? map[key] : 5;
               master_item:
                 key: semaphore.raw
               tags:
-                - tag: Semaphore
+                - tag: component
                   value: task-status
+                - tag: template
+                  value: '{#NAME}'
               trigger_prototypes:
                 - uuid: bb8e442fd6a348fe83031d1270f52466
-                  expression: 'last(/Zabbix template semaphore task monitoring/task.status[{#ID}])=2 and {$ENABLE_TRIGGER:"{#ID}"}=1'
-                  name: 'Task {#NAME} (ID {#LAST_TASK_ID}) failed'
-                  opdata: 'Status: {ITEM.LASTVALUE}'
+                  expression: 'last(/Semaphore UI by HTTP/semaphore.task.status[{#ID}])=2 and {$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}=1'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'last(/Semaphore UI by HTTP/semaphore.task.status[{#ID}])=1 or {$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}=0'
+                  name: 'Semaphore: Task "{#NAME}" failed on {HOST.NAME}'
+                  opdata: 'Status: {ITEM.LASTVALUE1}'
                   priority: WARNING
-                  description: 'The last run of template {#NAME} has status "error" (2). Can be disabled per template via context macro {$ENABLE_TRIGGER:"{#ID}"}=0 on the host.'
-                  manual_close: 'YES'
+                  description: |
+                    The last task execution for Semaphore template "{#NAME}" (template ID {#ID}) finished with status "Error" (2).
+                    This problem resolves automatically when a subsequent execution completes with "Success" (1), or can be silenced per template by setting `{$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}=0` on the host.
+
+                    Troubleshooting:
+                    1. Open Semaphore UI and inspect the task output log for template "{#NAME}" in project `{$SEMAPHORE.PROJECT.ID}`.
+                    2. Verify target host reachability, credentials, and playbook task errors.
+                  tags:
+                    - tag: scope
+                      value: availability
+                    - tag: template
+                      value: '{#NAME}'
                 - uuid: eb2cf8b2793640eba201231d9519fe64
-                  expression: 'min(/Zabbix template semaphore task monitoring/task.status[{#ID}],{$JOB_RUNNING_TIME})=3'
-                  name: 'Task {#NAME} running longer than {$JOB_RUNNING_TIME}'
-                  opdata: 'Status: {ITEM.LASTVALUE}'
+                  expression: 'min(/Semaphore UI by HTTP/semaphore.task.status[{#ID}],{$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"})=3 and count(/Semaphore UI by HTTP/semaphore.task.status[{#ID}],{$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"})>=3 and {$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}=1'
+                  recovery_mode: RECOVERY_EXPRESSION
+                  recovery_expression: 'last(/Semaphore UI by HTTP/semaphore.task.status[{#ID}])<>3 or {$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}=0'
+                  name: 'Semaphore: Task "{#NAME}" running longer than {$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"} on {HOST.NAME}'
+                  opdata: 'Status: {ITEM.LASTVALUE1}'
                   priority: WARNING
-                  description: 'Template {#NAME} has been in status "running" (3) for longer than {$JOB_RUNNING_TIME}. Possible hung task. Threshold adjustable via macro {$JOB_RUNNING_TIME}.'
-                  manual_close: 'YES'
+                  description: |
+                    Semaphore template "{#NAME}" (template ID {#ID}) has remained in the "Running" (3) state continuously for longer than `{$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"}`.
+
+                    Troubleshooting:
+                    1. Inspect the active task console in Semaphore UI for hung SSH connections, interactive prompts, or stalled tasks.
+                    2. Stop the hung task in Semaphore UI if needed, or override `{$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"}` on the host for legitimately long-running playbooks.
+                  tags:
+                    - tag: scope
+                      value: performance
+                    - tag: template
+                      value: '{#NAME}'
           master_item:
             key: semaphore.raw
           lld_macro_paths:
+            - lld_macro: '{#APP}'
+              path: $.app
             - lld_macro: '{#ID}'
               path: $.id
-            - lld_macro: '{#LAST_TASK_ID}'
-              path: $.last_task.id
             - lld_macro: '{#NAME}'
               path: $.name
-            - lld_macro: '{#STATUS}'
-              path: $.status
           preprocessing:
-            - type: JSONPATH
+            - type: JAVASCRIPT
               parameters:
-                - '$.[*]'
+                - |
+                  var data = JSON.parse(value);
+                  if (!Array.isArray(data)) {
+                    return '[]';
+                  }
+                  return JSON.stringify(data.map(function(t) {
+                    return {
+                      id: t.id,
+                      name: t.name,
+                      app: t.app || ''
+                    };
+                  }));
+            - type: DISCARD_UNCHANGED_HEARTBEAT
+              parameters:
+                - 1h
+      tags:
+        - tag: class
+          value: software
+        - tag: subclass
+          value: automation
+        - tag: target
+          value: semaphore
       macros:
-        - macro: '{$API_TOKEN}'
+        - macro: '{$SEMAPHORE.API.TOKEN}'
           type: SECRET_TEXT
-          description: 'Semaphore API token for authentication (Bearer token)'
-        - macro: '{$ENABLE_TRIGGER}'
+          description: 'Semaphore UI API Bearer token used for authenticating REST API requests.'
+        - macro: '{$SEMAPHORE.HTTP.TIMEOUT}'
+          value: 15s
+          description: 'HTTP agent request timeout for Semaphore UI API calls.'
+        - macro: '{$SEMAPHORE.LLD.FILTER.NAME.MATCHES}'
+          value: '.*'
+          description: 'Regex filter of Semaphore template names to include in discovery.'
+        - macro: '{$SEMAPHORE.LLD.FILTER.NAME.NOT_MATCHES}'
+          value: CHANGE_IF_NEEDED
+          description: 'Regex filter of Semaphore template names to exclude from discovery.'
+        - macro: '{$SEMAPHORE.PROJECT.ID}'
           value: '1'
-          description: 'Enables task failure triggers globally (1 = enabled, 0 = disabled). Per-template: set context macro {$ENABLE_TRIGGER:"{#ID}"}=0 on the host.'
-        - macro: '{$JOB_RUNNING_TIME}'
+          description: 'Semaphore numeric project ID (visible in the Semaphore URL `/project/<id>/`).'
+        - macro: '{$SEMAPHORE.TASK.RUNNING.MAX.TIME}'
           value: 1h
-          description: 'Time period after which a running task is considered stuck. Must include unit (e.g. 1h, 30m). Used directly as time period in min() trigger function.'
-        - macro: '{$PROJECT_NUMBER}'
+          description: 'Maximum duration a task may remain in Running state before alerting (supports context override `{$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"}`).'
+        - macro: '{$SEMAPHORE.TRIGGER.ENABLED}'
           value: '1'
-          description: 'Semaphore project ID. Visible in the Semaphore URL when opening a project (e.g. /project/1/).'
-        - macro: '{$SEMAPHORE_URL}'
-          value: 'http://192.168.10.105:3000'
-          description: 'Base URL of the Semaphore API including port. No trailing slash. Example: http://semaphore.example.com:3000'
+          description: 'Enables task failure and stuck-task triggers globally (`1` = enabled, `0` = disabled). Supports per-template context override `{$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}`.'
+        - macro: '{$SEMAPHORE.URL}'
+          value: 'http://localhost:3000'
+          description: 'Base URL of the Semaphore UI instance without trailing slash (e.g., `https://semaphore.example.com`).'
       dashboards:
         - uuid: 90a755353a54476d9c4e8077dbf685fb
           name: 'Semaphore Task Monitoring'
           pages:
-            - widgets:
+            - name: Overview
+              widgets:
                 - type: problems
                   name: 'Active Problems'
                   width: '36'
@@ -359,7 +507,7 @@ zabbix_export:
                     - type: ITEM
                       name: itemid.0
                       value:
-                        host: 'Zabbix template semaphore task monitoring'
+                        host: 'Semaphore UI by HTTP'
                         key: semaphore.ping
                     - type: INTEGER
                       name: rf_rate
@@ -377,7 +525,7 @@ zabbix_export:
                     - type: ITEM
                       name: itemid.0
                       value:
-                        host: 'Zabbix template semaphore task monitoring'
+                        host: 'Semaphore UI by HTTP'
                         key: semaphore.version
                     - type: INTEGER
                       name: rf_rate
@@ -395,7 +543,7 @@ zabbix_export:
                     - type: ITEM
                       name: itemid.0
                       value:
-                        host: 'Zabbix template semaphore task monitoring'
+                        host: 'Semaphore UI by HTTP'
                         key: semaphore.ansible.version
                     - type: INTEGER
                       name: rf_rate
@@ -421,15 +569,24 @@ zabbix_export:
                       value: '1'
       valuemaps:
         - uuid: 95b2e9f21739492dab9e8f3bcdd4830e
-          name: Task-status
+          name: 'Semaphore task status'
           mappings:
             - value: '0'
-              newvalue: stopped
+              newvalue: Stopped
             - value: '1'
-              newvalue: success
+              newvalue: Success
             - value: '2'
-              newvalue: error
+              newvalue: Error
             - value: '3'
-              newvalue: running
+              newvalue: Running
             - value: '4'
-              newvalue: waiting
+              newvalue: Waiting
+            - value: '5'
+              newvalue: Unknown
+        - uuid: d4b7e2a19c834f52a1b6e3d84c9f2054
+          name: 'Service state'
+          mappings:
+            - value: '0'
+              newvalue: Down
+            - value: '1'
+              newvalue: Up

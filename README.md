@@ -1,142 +1,129 @@
-# Zabbix Template Semaphore Ansible Task Monitoring
+# Semaphore UI by HTTP (`zbx_template_ansible_semaphore.yaml`)
 
-Agentless monitoring of Ansible Semaphore via REST API. Dynamically discovers templates via LLD, monitors task status, start/end time, playbook name, and app type. Triggers alerts on failures and stuck running tasks.
+Agentless monitoring of **Ansible Semaphore UI** via its REST API for **Zabbix 7.0+**. Dynamically discovers project templates via Low-Level Discovery (LLD), tracks last task execution status, task ID, start/end timestamps, playbook name, and runner app type, and alerts on API outages, template fetch failures, task failures, and hung running tasks.
 
 ---
 
 ## Requirements
 
-- **Zabbix Server** version 7.0 or higher
-- Ansible Semaphore instance with API access
-- Valid API token set in macro `{$API_TOKEN}`
-- Host macros configured on the Zabbix host object (see Macros section)
+- **Zabbix** version `7.0` or higher
+- **Semaphore UI** instance reachable via HTTP/HTTPS from the Zabbix Server or Zabbix Proxy
+- Semaphore API Bearer token configured in `{$SEMAPHORE.API.TOKEN}` (`SECRET_TEXT`)
 
 ---
 
-## Create an API Token
+## Create a Semaphore API Token
 
-1. Open the Semaphore web interface and log in.
-2. Navigate to **User → API Tokens** → **Create Token**.
-3. Copy the token — it is only shown once.
+1. Log in to the Semaphore web UI with an account that has read access to the target project.
+2. Navigate to **User → API Tokens → Create Token** (or generate one via CLI/API).
+3. Copy the token and store it in the Zabbix host macro `{$SEMAPHORE.API.TOKEN}` as **Secret text**.
 
 ---
 
-## Installation
+## Import & Host Setup
 
-1. **Import into Zabbix**
-   - Go to **Configuration → Templates → Import** and select the YAML file from the `7.0/` directory.
-
-2. **Create a Host**
-   - Go to **Configuration → Hosts → Create host**
-     - **Host name:** `semaphore01`
-     - **Groups:** e.g. `Applications` — do **not** use `Templates` (reserved for Zabbix template objects)
-     - **Interfaces:** leave empty
-     - **Templates:** attach `Zabbix template semaphore task monitoring`
-
-3. **Configure Macros**
-   - Open the **Macros** tab on the host and set the required macros (see below).
+1. **Validate Locally**:
+   ```bash
+   ./scripts/validate-templates.py
+   ```
+2. **Import into Zabbix**:
+   - Navigate to **Data collection → Templates → Import** and select `7.0/zbx_template_ansible_semaphore.yaml`.
+3. **Create or Link a Host**:
+   - Navigate to **Data collection → Hosts → Create host**:
+     - **Host name:** e.g. `semaphore` (or `semaphore-project-1` when monitoring multiple projects)
+     - **Host groups:** e.g. `Applications`
+     - **Templates:** Link **Semaphore UI by HTTP**
+     - **Interfaces:** None required (HTTP Agent items run agentlessly)
+4. **Configure Host Macros**:
+   - Set `{$SEMAPHORE.URL}`, `{$SEMAPHORE.API.TOKEN}` (`Secret text`), and `{$SEMAPHORE.PROJECT.ID}` on the host.
 
 ---
 
 ## Macros
 
-### Required
+### Required Host Macros
 
-| Macro               | Example value                | Description                                              |
-|---------------------|------------------------------|----------------------------------------------------------|
-| `{$API_TOKEN}`      | *(SECRET_TEXT)*              | Semaphore API token (Bearer)                             |
-| `{$SEMAPHORE_URL}`  | `http://192.168.10.105:3000` | Base URL of the API including port — **no trailing slash** |
-| `{$PROJECT_NUMBER}` | `1`                          | Project ID — visible in the Semaphore URL (`/project/1/`) |
+| Macro | Default in Template | Type | Description |
+| :--- | :--- | :---: | :--- |
+| `{$SEMAPHORE.API.TOKEN}` | *(blank)* | `SECRET_TEXT` | Semaphore API Bearer token used for REST authentication |
+| `{$SEMAPHORE.URL}` | `http://localhost:3000` | `TEXT` | Base URL of the Semaphore UI API without trailing slash (e.g., `https://semaphore.example.com`) |
+| `{$SEMAPHORE.PROJECT.ID}` | `1` | `TEXT` | Numeric project ID (visible in Semaphore URL `/project/<id>/`) |
 
-### Optional
+### Optional / Threshold Macros
 
-| Macro                       | Default  | Description                                                                                     |
-|-----------------------------|----------|-------------------------------------------------------------------------------------------------|
-| `{$ENABLE_TRIGGER}`         | `1`      | Enable task failure alerts globally (1 = on, 0 = off)                                          |
-| `{$ENABLE_TRIGGER:"{#ID}"}` | *(inherits)* | Per-template override via context macro — set `{$ENABLE_TRIGGER:"3"}=0` on the host to silence a specific template |
-| `{$JOB_RUNNING_TIME}`       | `1h`     | Time period with unit (e.g. `1h`, `30m`) — alert fires when task is continuously in "running" state for this duration |
-
----
-
-## Template Contents
-
-### HTTP Agent Items
-
-| Key | Endpoint | Interval | Description |
-|-----|----------|----------|-------------|
-| `semaphore.ping` | `GET /api/ping` | 60s | Health check — expects `"pong"` |
-| `semaphore.info.raw` | `GET /api/info` | 3600s | Raw version info |
-| `semaphore.raw` | `GET /api/project/{$PROJECT_NUMBER}/templates` | 300s | Template list — source for LLD and all dependent items |
-
-### Dependent Items (from `semaphore.info.raw`)
-
-| Key | Description |
-|-----|-------------|
-| `semaphore.version` | Semaphore software version |
-| `semaphore.ansible.version` | Ansible version on the Semaphore host |
-
-### Discovery Rule
-
-**semaphor-discover** — dependent on `semaphore.raw`
-
-LLD macros per discovered template:
-
-| Macro             | Field            | Description                              |
-|-------------------|------------------|------------------------------------------|
-| `{#ID}`           | `$.id`           | Template ID                              |
-| `{#NAME}`         | `$.name`         | Template name                            |
-| `{#LAST_TASK_ID}` | `$.last_task.id` | Last task run ID                         |
-| `{#STATUS}`       | `$.status`       | Top-level template status (informational) |
-
-### Item Prototypes (all dependent on `semaphore.raw`)
-
-| Key | Description |
-|-----|-------------|
-| `task.status[{#ID}]` | Last task status as a number (valuemap: 0–4) |
-| `task.starttime[{#ID}]` | Start time of the last run (Unix timestamp) |
-| `task.endtime[{#ID}]` | End time of the last run — discarded while task is running |
-| `task.playbook[{#ID}]` | Playbook name of the last run |
-| `task.app[{#ID}]` | App type of the template (ansible, terraform, …) |
-
-### Triggers
-
-| Name | Condition | Severity |
-|------|-----------|----------|
-| Semaphore API unreachable | `semaphore.ping <> "pong"` | Average |
-| Task `{#NAME}` failed | `task.status = 2` and `{$ENABLE_TRIGGER:"{#ID}"}=1` | Warning |
-| Task `{#NAME}` running longer than `{$JOB_RUNNING_TIME}` | `task.status = 3` continuously for `{$JOB_RUNNING_TIME}` | Warning |
-
-All triggers: Manual close = Yes.
+| Macro | Default | Type | Description |
+| :--- | :--- | :---: | :--- |
+| `{$SEMAPHORE.HTTP.TIMEOUT}` | `15s` | `TEXT` | HTTP agent timeout for Semaphore API endpoints |
+| `{$SEMAPHORE.TRIGGER.ENABLED}` | `1` | `TEXT` | Enable task failure and long-running task alerts globally (`1` = enabled, `0` = disabled) |
+| `{$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}` | *(inherits)* | `TEXT` | Per-template context override (e.g., set `{$SEMAPHORE.TRIGGER.ENABLED:"3"}=0` to silence template ID `3`) |
+| `{$SEMAPHORE.TASK.RUNNING.MAX.TIME}` | `1h` | `TEXT` | Duration with unit (`1h`, `30m`) before a continuously running task alerts |
+| `{$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"}` | *(inherits)* | `TEXT` | Per-template context override for legitimately long-running playbooks |
+| `{$SEMAPHORE.LLD.FILTER.NAME.MATCHES}` | `.*` | `TEXT` | Regex of template names to include in LLD |
+| `{$SEMAPHORE.LLD.FILTER.NAME.NOT_MATCHES}` | `CHANGE_IF_NEEDED` | `TEXT` | Regex of template names to exclude from LLD |
 
 ---
 
-## Dashboard
+## Collected Metrics & Discovery
 
-The template includes a **Semaphore Task Monitoring** dashboard with:
-- **Problems widget** (full width) — all active alerts for this host
-- **Item widget** — API status (ping)
-- **Item widget** — Semaphore version
-- **Item widget** — Ansible version
-- **Clock widget** — server time
+### Master HTTP Agent Items
+
+| Key | Endpoint | Interval | History | Description |
+| :--- | :--- | :---: | :---: | :--- |
+| `semaphore.ping` | `GET /api/ping` | `1m` | `7d` | Health check (`1` = Up on `"pong"`, `0` = Down) |
+| `semaphore.info.raw` | `GET /api/info` | `1h` | `0` | Raw JSON payload for Semaphore & Ansible versions |
+| `semaphore.raw` | `GET /api/project/{$SEMAPHORE.PROJECT.ID}/templates` | `5m` | `0` | Raw JSON payload for template LLD and dependent task items |
+
+### Static Dependent Items (from `semaphore.info.raw`)
+
+| Key | Value Type | Heartbeat | Description |
+| :--- | :---: | :---: | :--- |
+| `semaphore.version` | `CHAR` | `1d` | Semaphore UI software version (`$.version`) |
+| `semaphore.ansible.version` | `CHAR` | `1d` | Installed Ansible version (`$.ansible`) |
+
+### Discovery Rule (`semaphore.template.discovery`)
+
+Dependent on `semaphore.raw`. Strips volatile `last_task` fields before applying a `1h` `DISCARD_UNCHANGED_HEARTBEAT` so LLD only updates when templates are added, renamed, or removed.
+
+| LLD Macro | JSONPath | Description |
+| :--- | :--- | :--- |
+| `{#ID}` | `$.id` | Semaphore template ID |
+| `{#NAME}` | `$.name` | Semaphore template display name |
+| `{#APP}` | `$.app` | Runner application type (`ansible`, `terraform`, `bash`, etc.) |
+
+### Item Prototypes (dependent on `semaphore.raw`)
+
+| Key | Type / Units | Heartbeat | Description |
+| :--- | :---: | :---: | :--- |
+| `semaphore.task.status[{#ID}]` | `UNSIGNED` (`Semaphore task status`) | — | Last task status (`0`=Stopped, `1`=Success, `2`=Error, `3`=Running, `4`=Waiting, `5`=Unknown) |
+| `semaphore.task.id[{#ID}]` | `UNSIGNED` | `1d` | Last task execution ID (`last_task.id`) |
+| `semaphore.task.start_time[{#ID}]` | `UNSIGNED` (`unixtime`) | `1d` | Last task start timestamp in epoch seconds |
+| `semaphore.task.end_time[{#ID}]` | `UNSIGNED` (`unixtime`) | `1d` | Last task end timestamp in epoch seconds (discarded while running) |
+| `semaphore.task.playbook[{#ID}]` | `CHAR` | `1d` | Playbook filename from `last_task.tpl_playbook` |
+| `semaphore.task.app[{#ID}]` | `CHAR` | `1d` | Runner app type (`app`) |
+
+### Triggers & Trigger Prototypes
+
+| Trigger Name | Problem Expression | Recovery Expression | Severity |
+| :--- | :--- | :--- | :---: |
+| `Semaphore: API is unreachable on {HOST.NAME}` | `max(/.../semaphore.ping,#3)=0 or nodata(/.../semaphore.ping,3m)=1` | `min(/.../semaphore.ping,#2)=1` | Average |
+| `Semaphore: Failed to fetch project templates on {HOST.NAME}` | `nodata(/.../semaphore.raw,15m)=1` *(depends on API unreachable)* | *(auto on data)* | Warning |
+| `Semaphore: Version has changed on {HOST.NAME}` | `last(#1)<>last(#2) and length(last())>0` | Manual close | Info |
+| `Semaphore: Task "{#NAME}" failed on {HOST.NAME}` | `last(semaphore.task.status[{#ID}])=2 and {$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}=1` | `last(semaphore.task.status[{#ID}])=1 or {$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}=0` | Warning |
+| `Semaphore: Task "{#NAME}" running longer than {$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"} on {HOST.NAME}` | `min(...,{$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"})=3 and count(...,{$SEMAPHORE.TASK.RUNNING.MAX.TIME:"{#ID}"})>=3 and {$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}=1` | `last(semaphore.task.status[{#ID}])<>3 or {$SEMAPHORE.TRIGGER.ENABLED:"{#ID}"}=0` | Warning |
 
 ---
 
-## Value Map — Task-status
+## Value Maps
 
-| Value | Status  |
-|-------|---------|
-| `0`   | stopped |
-| `1`   | success |
-| `2`   | error   |
-| `3`   | running |
-| `4`   | waiting |
+- **`Service state`**: `0` → `Down`, `1` → `Up`
+- **`Semaphore task status`**: `0` → `Stopped`, `1` → `Success`, `2` → `Error`, `3` → `Running`, `4` → `Waiting`, `5` → `Unknown`
 
 ---
 
-## Multiple Projects
+## Monitoring Multiple Semaphore Projects
 
-Create one host per Semaphore project and set `{$PROJECT_NUMBER}` individually per host. No template changes required.
+Create one Zabbix host per Semaphore project and set `{$SEMAPHORE.PROJECT.ID}` individually per host.
 
 ---
 
-> **Source:** https://github.com/Garfieldttt/zabbix-semaphore-ansible/tree/zabbix
+> **Upstream attribution:** Adapted from [Garfieldttt/zabbix-semaphore-ansible](https://github.com/Garfieldttt/zabbix-semaphore-ansible/tree/zabbix).
